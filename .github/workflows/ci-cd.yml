@@ -1,14 +1,14 @@
-name: CI/CD Pipeline
+name: Build and Update Manifest
 
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    paths:
+      - 'app/**'
 
 env:
   DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  DOCKER_IMAGE: nodejs-k8s-demo
+  IMAGE_NAME: nodejs-k8s-demo
 
 jobs:
   build-and-push:
@@ -17,6 +17,9 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
@@ -27,85 +30,56 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v4
-      with:
-        images: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}
-        tags: |
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
+    - name: Generate image tag
+      id: image-tag
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "tag=${SHORT_SHA}" >> $GITHUB_OUTPUT
+        echo "full_image=${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v4
       with:
         context: ./app
         push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
+        tags: |
+          ${{ steps.image-tag.outputs.full_image }}
+          ${{ env.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
 
-    - name: Update Kubernetes manifests
+    - name: Update Kubernetes deployment manifest
       run: |
-        sed -i "s|image:.*|image: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ github.sha }}|g" k8s/deployment.yaml
+        sed -i "s|image: .*|image: ${{ steps.image-tag.outputs.full_image }}|g" k8s/deployment.yaml
+        cat k8s/deployment.yaml
+
+    - name: Commit and push manifest changes
+      run: |
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
         
-    - name: Commit and push if changed
-      run: |
-        git config --global user.email "github-actions@github.com"
-        git config --global user.name "GitHub Actions"
         git add k8s/deployment.yaml
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Update image to ${{ github.sha }}" && git push)name: CI/CD Pipeline
+        
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "🤖 Update image to ${{ steps.image-tag.outputs.tag }} [skip ci]"
+          git push origin main
+          echo "✅ Manifest updated and pushed"
+        fi
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-
-env:
-  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-  DOCKER_IMAGE: nodejs-k8s-demo
-
-jobs:
-  build-and-push:
+  notify:
+    needs: build-and-push
     runs-on: ubuntu-latest
+    if: always()
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKER_USERNAME }}
-        password: ${{ secrets.DOCKER_PASSWORD }}
-
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v4
-      with:
-        images: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}
-        tags: |
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: ./app
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-
-    - name: Update Kubernetes manifests
+    - name: Deployment Status
       run: |
-        sed -i "s|image:.*|image: ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE }}:${{ github.sha }}|g" k8s/deployment.yaml
-        
-    - name: Commit and push if changed
-      run: |
-        git config --global user.email "github-actions@github.com"
-        git config --global user.name "GitHub Actions"
-        git add k8s/deployment.yaml
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Update image to ${{ github.sha }}" && git push)
+        if [ "${{ needs.build-and-push.result }}" == "success" ]; then
+          echo "✅ Build successful! ArgoCD will sync automatically."
+          echo "⏰ Check ArgoCD in ~3 minutes for the update."
+        else
+          echo "❌ Build failed. Check logs."
+          exit 1
+        fi
