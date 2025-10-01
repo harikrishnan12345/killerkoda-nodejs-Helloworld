@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
       - name: nodejs-app
-        image: YOUR_DOCKERHUB_USERNAME/nodejs-k8s-demo:latest
+        image: hariaws123/nodejs-k8s-demo:latest
         ports:
         - containerPort: 3000
         env:
